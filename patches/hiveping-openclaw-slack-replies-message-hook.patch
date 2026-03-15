@@ -1,0 +1,45 @@
+--- a/src/slack/monitor/replies.ts
++++ b/src/slack/monitor/replies.ts
+@@ -4,6 +4,7 @@
+ import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../../auto-reply/tokens.js";
+ import type { ReplyPayload } from "../../auto-reply/types.js";
+ import type { MarkdownTableMode } from "../../config/types.base.js";
++import { applyOutboundMessageSendingHook } from "../../hooks/message-sending-outbound.js";
+ import type { RuntimeEnv } from "../../runtime.js";
+ import { markdownToSlackMrkdwnChunks } from "../format.js";
+ import { sendMessageSlack, type SlackSendIdentity } from "../send.js";
+@@ -30,8 +31,24 @@
+       continue;
+     }
+ 
++    const hookResult = await applyOutboundMessageSendingHook({
++      channelId: "slack",
++      to: params.target,
++      content: text,
++      accountId: params.accountId,
++      conversationId: params.target,
++      metadata: {
++        threadTs,
++        mediaUrls: mediaList,
++      },
++    });
++    if (hookResult.cancelled) {
++      continue;
++    }
++    const textAfterHook = hookResult.content;
++
+     if (mediaList.length === 0) {
+-      const trimmed = text.trim();
++      const trimmed = textAfterHook.trim();
+       if (!trimmed || isSilentReplyText(trimmed, SILENT_REPLY_TOKEN)) {
+         continue;
+       }
+@@ -44,7 +61,7 @@
+     } else {
+       let first = true;
+       for (const mediaUrl of mediaList) {
+-        const caption = first ? text : "";
++        const caption = first ? textAfterHook : "";
+         first = false;
+         await sendMessageSlack(params.target, caption, {
+           token: params.token,

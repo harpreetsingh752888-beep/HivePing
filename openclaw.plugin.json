@@ -1,0 +1,260 @@
+{
+  "id": "hiveping",
+  "name": "HivePing",
+  "version": "0.1.0",
+  "description": "Conversation-scoped mention bridge with configurable reasoning backend for Discord, Slack, and Microsoft Teams",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "openclawCommand": {
+        "type": "string",
+        "default": "openclaw",
+        "description": "Command used for direct outbound reply delivery (for example: openclaw). If set to openclaw and missing, plugin tries openclaw-cli."
+      },
+      "codexCommand": {
+        "type": "string",
+        "default": "codex"
+      },
+      "reasoningCommand": {
+        "type": "string",
+        "description": "Optional override for the MCP server command used for repository reasoning. Defaults to codexCommand, then codex."
+      },
+      "reasoningArgs": {
+        "type": "array",
+        "description": "Arguments passed to the reasoning MCP server command. Defaults to [\"mcp-server\"].",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "mcp-server"
+        ]
+      },
+      "reasoningToolName": {
+        "type": "string",
+        "default": "codex",
+        "description": "MCP tool name invoked on the reasoning server. Defaults to codex."
+      },
+      "bindingsFile": {
+        "type": "string",
+        "default": ".hiveping/bindings.json",
+        "description": "Relative path for persisted conversation bindings"
+      },
+      "runtimeConfigFile": {
+        "type": "string",
+        "default": ".hiveping/runtime-config.json",
+        "description": "File used by @hiveping config to persist managed runtime settings"
+      },
+      "allowedRoots": {
+        "type": "array",
+        "description": "Optional list of allowed root paths for @hiveping bind",
+        "items": {
+          "type": "string"
+        }
+      },
+      "mentionHookEnabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable @mention-based command handling via message hook"
+      },
+      "mentionAliases": {
+        "type": "array",
+        "description": "Message aliases that trigger mention commands (example: @hiveping).",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "@hiveping"
+        ]
+      },
+      "defaultSandbox": {
+        "type": "string",
+        "enum": [
+          "read-only",
+          "workspace-write",
+          "danger-full-access"
+        ],
+        "default": "read-only"
+      },
+      "defaultApprovalPolicy": {
+        "type": "string",
+        "enum": [
+          "untrusted",
+          "on-request",
+          "never"
+        ],
+        "default": "never"
+      },
+      "defaultModel": {
+        "type": "string"
+      },
+      "defaultProfile": {
+        "type": "string"
+      },
+      "organizationName": {
+        "type": "string",
+        "description": "Organization slug sent to the config API for RBAC decisions"
+      },
+      "configApiUrl": {
+        "type": "string",
+        "description": "Full URL for POST /get-hiveping-config (enables API RBAC enforcement when set)"
+      },
+      "configApiToken": {
+        "type": "string",
+        "description": "Optional bearer token for the config API Authorization header"
+      },
+      "configApiTimeoutMs": {
+        "type": "number",
+        "default": 8000,
+        "minimum": 500,
+        "description": "Config API request timeout in milliseconds"
+      },
+      "rolePolicyEnabled": {
+        "type": "boolean",
+        "default": false,
+        "description": "Enable local JSON role policy enforcement per project"
+      },
+      "rolePolicyDir": {
+        "type": "string",
+        "description": "Optional directory containing role-policy JSON files; when unset, defaults to <bound-repo>/.hiveping/policies"
+      },
+      "skillsFile": {
+        "type": "string",
+        "description": "Optional skill routing file; when unset, defaults to <bound-repo>/.hiveping/skills.md"
+      },
+      "skillsMode": {
+        "type": "string",
+        "enum": [
+          "rules",
+          "agent"
+        ],
+        "default": "rules",
+        "description": "Skill routing mode: rules parses structured skills.md entries, agent asks the configured reasoning backend to interpret SKILLS.md semantically"
+      },
+      "approvalRequestsFile": {
+        "type": "string",
+        "default": ".hiveping/approval-requests.json",
+        "description": "File used to persist pending/approved/rejected write approval requests"
+      },
+      "changeSandbox": {
+        "type": "string",
+        "enum": [
+          "workspace-write",
+          "danger-full-access"
+        ],
+        "default": "workspace-write",
+        "description": "Sandbox used for approved code-change execution"
+      },
+      "changeApprovalPolicy": {
+        "type": "string",
+        "enum": [
+          "untrusted",
+          "on-request",
+          "never"
+        ],
+        "default": "on-request",
+        "description": "Approval policy used for approved code-change execution"
+      },
+      "actionWebhookUrl": {
+        "type": "string",
+        "description": "Webhook URL invoked for approved external actions"
+      },
+      "actionWebhookToken": {
+        "type": "string",
+        "description": "Optional bearer token for action webhook calls"
+      },
+      "actionWebhookTimeoutMs": {
+        "type": "number",
+        "default": 8000,
+        "minimum": 500,
+        "description": "Action webhook request timeout in milliseconds"
+      }
+    }
+  },
+  "uiHints": {
+    "openclawCommand": {
+      "label": "OpenClaw command"
+    },
+    "codexCommand": {
+      "label": "Codex command (legacy)"
+    },
+    "reasoningCommand": {
+      "label": "Reasoning command"
+    },
+    "reasoningArgs": {
+      "label": "Reasoning args"
+    },
+    "reasoningToolName": {
+      "label": "Reasoning tool name"
+    },
+    "bindingsFile": {
+      "label": "Bindings file"
+    },
+    "runtimeConfigFile": {
+      "label": "Runtime config file"
+    },
+    "allowedRoots": {
+      "label": "Allowed roots"
+    },
+    "mentionHookEnabled": {
+      "label": "Enable mention hook"
+    },
+    "mentionAliases": {
+      "label": "Mention aliases"
+    },
+    "defaultSandbox": {
+      "label": "Default sandbox"
+    },
+    "defaultApprovalPolicy": {
+      "label": "Default approval policy"
+    },
+    "defaultModel": {
+      "label": "Default model"
+    },
+    "defaultProfile": {
+      "label": "Default profile"
+    },
+    "organizationName": {
+      "label": "Organization name"
+    },
+    "configApiUrl": {
+      "label": "Config API URL"
+    },
+    "configApiToken": {
+      "label": "Config API token"
+    },
+    "configApiTimeoutMs": {
+      "label": "Config API timeout (ms)"
+    },
+    "rolePolicyEnabled": {
+      "label": "Enable role policy"
+    },
+    "rolePolicyDir": {
+      "label": "Role policy directory"
+    },
+    "skillsFile": {
+      "label": "Skills file"
+    },
+    "skillsMode": {
+      "label": "Skills mode"
+    },
+    "approvalRequestsFile": {
+      "label": "Approval requests file"
+    },
+    "changeSandbox": {
+      "label": "Change sandbox"
+    },
+    "changeApprovalPolicy": {
+      "label": "Change approval policy"
+    },
+    "actionWebhookUrl": {
+      "label": "Action webhook URL"
+    },
+    "actionWebhookToken": {
+      "label": "Action webhook token"
+    },
+    "actionWebhookTimeoutMs": {
+      "label": "Action webhook timeout (ms)"
+    }
+  }
+}

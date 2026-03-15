@@ -1,0 +1,24 @@
+{
+  "name": "hiveping",
+  "version": "0.1.0",
+  "author": "maninderpreetchanna@gmail.com",
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --target node18 --out-dir dist --clean",
+    "test": "node --import tsx --test \"src/test/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "tsup": "^8.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.0.0"
+  }
+}

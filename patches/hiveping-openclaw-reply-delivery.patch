@@ -1,0 +1,63 @@
+--- a/src/discord/monitor/reply-delivery.ts
++++ b/src/discord/monitor/reply-delivery.ts
+@@ -7,6 +7,7 @@
+ import { createDiscordRetryRunner, type RetryRunner } from "../../infra/retry-policy.js";
+ import { resolveRetryConfig, retryAsync, type RetryConfig } from "../../infra/retry.js";
+ import { convertMarkdownTables } from "../../markdown/tables.js";
++import { applyOutboundMessageSendingHook } from "../../hooks/message-sending-outbound.js";
+ import type { RuntimeEnv } from "../../runtime.js";
+ import { resolveDiscordAccount } from "../accounts.js";
+ import { chunkDiscordTextWithMode } from "../chunk.js";
+@@ -295,15 +296,31 @@
+     if (!text && mediaList.length === 0) {
+       continue;
+     }
++
++    const hookResult = await applyOutboundMessageSendingHook({
++      channelId: "discord",
++      to: params.target,
++      content: text,
++      accountId: params.accountId,
++      metadata: {
++        replyToId: params.replyToId,
++        threadId: resolveTargetChannelId(params.target),
++        mediaUrls: mediaList,
++      },
++    });
++    if (hookResult.cancelled) {
++      continue;
++    }
++    const textAfterHook = hookResult.content;
+     if (mediaList.length === 0) {
+       const mode = params.chunkMode ?? "length";
+-      const chunks = chunkDiscordTextWithMode(text, {
++      const chunks = chunkDiscordTextWithMode(textAfterHook, {
+         maxChars: chunkLimit,
+         maxLines: params.maxLinesPerMessage,
+         chunkMode: mode,
+       });
+-      if (!chunks.length && text) {
+-        chunks.push(text);
++      if (!chunks.length && textAfterHook) {
++        chunks.push(textAfterHook);
+       }
+       for (const chunk of chunks) {
+         if (!chunk.trim()) {
+@@ -352,7 +369,7 @@
+       await sendDiscordChunkWithFallback({
+         cfg: params.cfg,
+         target: params.target,
+-        text,
++        text: textAfterHook,
+         token: params.token,
+         rest: params.rest,
+         accountId: params.accountId,
+@@ -382,7 +399,7 @@
+     }
+ 
+     const replyTo = resolveReplyTo();
+-    await sendMessageDiscord(params.target, text, {
++    await sendMessageDiscord(params.target, textAfterHook, {
+       cfg: params.cfg,
+       token: params.token,
+       rest: params.rest,

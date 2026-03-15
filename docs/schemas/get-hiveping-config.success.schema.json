@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hiveping.dev/schema/get-hiveping-config.success.schema.json",
+  "title": "GetHivePingConfigSuccessResponse",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ok", "organization", "user", "policy", "projects"],
+  "properties": {
+    "ok": {
+      "type": "boolean",
+      "const": true
+    },
+    "requestId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "issuedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "organization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        }
+      }
+    },
+    "user": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "roles", "permissions"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9:_-]{1,64}$"
+          },
+          "uniqueItems": true
+        },
+        "permissions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["canBind", "canAsk", "canStatus", "canUnbind"],
+          "properties": {
+            "canBind": {
+              "type": "boolean"
+            },
+            "canAsk": {
+              "type": "boolean"
+            },
+            "canStatus": {
+              "type": "boolean"
+            },
+            "canUnbind": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowedRoots", "defaultSandbox", "defaultApprovalPolicy", "readOnlyCodex", "requireBindingForAsk"],
+      "properties": {
+        "allowedRoots": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "uniqueItems": true
+        },
+        "defaultSandbox": {
+          "type": "string",
+          "enum": ["read-only", "workspace-write", "danger-full-access"]
+        },
+        "defaultApprovalPolicy": {
+          "type": "string",
+          "enum": ["untrusted", "on-request", "never"]
+        },
+        "readOnlyCodex": {
+          "type": "boolean"
+        },
+        "requireBindingForAsk": {
+          "type": "boolean"
+        },
+        "requireProjectMatchForBind": {
+          "type": "boolean"
+        }
+      }
+    },
+    "projects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "repoPath", "enabled"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "repoPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "allowedRoles": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9:_-]{1,64}$"
+            },
+            "uniqueItems": true
+          },
+          "allowedConversationPrefixes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "uniqueItems": true
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": {
+              "type": ["string", "number", "boolean", "null"]
+            }
+          }
+        }
+      }
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    }
+  }
+}

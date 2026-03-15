@@ -1,0 +1,103 @@
+diff --git a/src/hooks/message-hook-mappers.test.ts b/src/hooks/message-hook-mappers.test.ts
+index c365f463a..bb3c61568 100644
+--- a/src/hooks/message-hook-mappers.test.ts
++++ b/src/hooks/message-hook-mappers.test.ts
+@@ -33,6 +33,7 @@ function makeInboundCtx(overrides: Partial<FinalizedMsgContext> = {}): Finalized
+     SenderName: "User One",
+     SenderUsername: "userone",
+     SenderE164: "+15551234567",
++    WasMentioned: true,
+     MessageThreadId: 42,
+     MediaPath: "/tmp/audio.ogg",
+     MediaType: "audio/ogg",
+@@ -79,9 +80,14 @@ describe("message hook mappers", () => {
+       content: "commands-body",
+       timestamp: 1710000000,
+       metadata: expect.objectContaining({
++        body: "body",
++        rawBody: "raw-body",
++        bodyForCommands: "commands-body",
++        bodyForAgent: "body-for-agent",
+         messageId: "msg-1",
+         senderName: "User One",
+         threadId: 42,
++        wasMentioned: true,
+       }),
+     });
+     expect(toInternalMessageReceivedContext(canonical)).toEqual({
+@@ -95,6 +101,7 @@ describe("message hook mappers", () => {
+       metadata: expect.objectContaining({
+         senderUsername: "userone",
+         senderE164: "+15551234567",
++        wasMentioned: true,
+       }),
+     });
+   });
+diff --git a/src/hooks/message-hook-mappers.ts b/src/hooks/message-hook-mappers.ts
+index 1cdd12a93..ef8d615f8 100644
+--- a/src/hooks/message-hook-mappers.ts
++++ b/src/hooks/message-hook-mappers.ts
+@@ -17,6 +17,9 @@ export type CanonicalInboundMessageHookContext = {
+   to?: string;
+   content: string;
+   body?: string;
++  rawBody?: string;
++  bodyForCommands?: string;
++  commandBody?: string;
+   bodyForAgent?: string;
+   transcript?: string;
+   timestamp?: number;
+@@ -37,6 +40,7 @@ export type CanonicalInboundMessageHookContext = {
+   originatingTo?: string;
+   guildId?: string;
+   channelName?: string;
++  wasMentioned?: boolean;
+   isGroup: boolean;
+   groupId?: string;
+ };
+@@ -78,6 +82,9 @@ export function deriveInboundMessageHookContext(
+     to: ctx.To,
+     content,
+     body: ctx.Body,
++    rawBody: ctx.RawBody,
++    bodyForCommands: ctx.BodyForCommands,
++    commandBody: ctx.CommandBody,
+     bodyForAgent: ctx.BodyForAgent,
+     transcript: ctx.Transcript,
+     timestamp:
+@@ -106,6 +113,7 @@ export function deriveInboundMessageHookContext(
+     originatingTo: ctx.OriginatingTo,
+     guildId: ctx.GroupSpace,
+     channelName: ctx.GroupChannel,
++    wasMentioned: ctx.WasMentioned === true ? true : undefined,
+     isGroup,
+     groupId: isGroup ? conversationId : undefined,
+   };
+@@ -158,6 +166,11 @@ export function toPluginMessageReceivedEvent(
+       to: canonical.to,
+       provider: canonical.provider,
+       surface: canonical.surface,
++      body: canonical.body,
++      rawBody: canonical.rawBody,
++      bodyForCommands: canonical.bodyForCommands,
++      commandBody: canonical.commandBody,
++      bodyForAgent: canonical.bodyForAgent,
+       threadId: canonical.threadId,
+       originatingChannel: canonical.originatingChannel,
+       originatingTo: canonical.originatingTo,
+@@ -168,6 +181,7 @@ export function toPluginMessageReceivedEvent(
+       senderE164: canonical.senderE164,
+       guildId: canonical.guildId,
+       channelName: canonical.channelName,
++      wasMentioned: canonical.wasMentioned,
+     },
+   };
+ }
+@@ -205,6 +219,7 @@ export function toInternalMessageReceivedContext(
+       senderE164: canonical.senderE164,
+       guildId: canonical.guildId,
+       channelName: canonical.channelName,
++      wasMentioned: canonical.wasMentioned,
+     },
+   };
+ }
