@@ -1,9 +1,12 @@
+import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { runGovern, type GovernDeps } from "../commands/govern.js";
+import { allMentionAliases, resolveAgentProfiles } from "../core/agent-profiles.js";
 import { DEFAULT_MENTION_ALIASES, PLUGIN_ID, PLUGIN_NAME } from "../core/branding.js";
+import { callReasoningOnce } from "../core/codex-client.js";
 import { resolveConversationKey } from "../providers/index.js";
-import type { ConversationKeyContext, PluginConfig } from "../types.js";
+import type { AgentProfile, ConversationKeyContext, PluginConfig } from "../types.js";
 
 type MentionHookApi = {
   on?: (
@@ -41,6 +44,25 @@ type MentionReplyDelivery = {
 
 type MentionHookOptions = {
   sendReply?: (delivery: MentionReplyDelivery) => Promise<void>;
+  consolidateReply?: (params: { prompt: string; results: AgentExecutionResult[] }) => Promise<string>;
+};
+
+type MentionInvocation = {
+  args: string;
+  agentProfiles?: AgentProfile[];
+  restrictedAgents?: Array<{ agentProfile: AgentProfile; reason: string }>;
+};
+
+type LeadingMentionMatch = {
+  args: string;
+  matchedGeneric: boolean;
+  matchedAgent?: AgentProfile;
+};
+
+type AgentExecutionResult = {
+  agentProfile: AgentProfile;
+  text: string;
+  error?: string;
 };
 
 const execFileAsync = promisify(execFile);
@@ -71,71 +93,359 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 function mentionAliases(config: PluginConfig): string[] {
-  const configured = (config.mentionAliases || [])
-    .map((value) => value.trim())
-    .filter((value) => value.length > 0);
+  const configured = allMentionAliases(config);
   if (configured.length > 0) {
     return configured;
   }
   return [...DEFAULT_MENTION_ALIASES];
 }
 
-function extractPlatformMentionArgs(content: string): string | undefined {
+function extractPlatformMention(content: string): { mentionId: string; args: string } | undefined {
   const trimmed = content.trim();
   if (!trimmed) return undefined;
 
-  const match = trimmed.match(/^(?:<@!?[A-Za-z0-9._-]+(?:\|[^>]+)?>)(?:\s*[:,\-]?\s*)(.*)$/);
+  const match = trimmed.match(
+    /^(?:<@!?([A-Za-z0-9._-]+)(?:\|[^>]+)?>)(?:\s*[:,\-]?\s*)(.*)$/,
+  );
   if (!match) return undefined;
 
-  // Mention-first mode: everything after platform mention is treated as input.
+  return {
+    mentionId: (match[1] || "").trim(),
+    args: (match[2] || "").trim(),
+  };
+}
+
+function extractAliasArgs(content: string, alias: string): string | undefined {
+  const trimmed = content.trim();
+  if (!trimmed) return undefined;
+
+  const regex = new RegExp(
+    `(?:^|\\s)${escapeRegExp(alias)}(?=$|\\s|[:,\\-])(?:\\s*[:,\\-]?\\s*)(.*)$`,
+    "i",
+  );
+  const match = trimmed.match(regex);
+  if (!match) {
+    return undefined;
+  }
   return (match[1] || "").trim();
 }
 
-function extractMentionArgs(content: string, aliases: string[]): string | undefined {
+function isLeadingOnlyAlias(alias: string): boolean {
+  const trimmed = alias.trim();
+  return trimmed.startsWith("(") && trimmed.endsWith(")");
+}
+
+function extractLeadingParenthesizedAgentArgs(
+  content: string,
+  agentId: string,
+): string | undefined {
+  const trimmed = content.trim();
+  if (!trimmed.startsWith("(")) {
+    return undefined;
+  }
+
+  const closeIndex = trimmed.indexOf(")");
+  if (closeIndex <= 1) {
+    return undefined;
+  }
+
+  const inside = trimmed.slice(1, closeIndex).trim().toLowerCase();
+  if (inside !== agentId.trim().toLowerCase()) {
+    return undefined;
+  }
+
+  const nextChar = trimmed.slice(closeIndex + 1, closeIndex + 2);
+  if (nextChar && !/[\s,:-]/.test(nextChar)) {
+    return undefined;
+  }
+
+  return trimmed.slice(closeIndex + 1).replace(/^\s*[:,\-]?\s*/, "").trim();
+}
+
+function extractStrippedAliasArgs(content: string, alias: string): string | undefined {
   const trimmed = content.trim();
   if (!trimmed) return undefined;
 
-  const platformMentionArgs = extractPlatformMentionArgs(trimmed);
-  if (platformMentionArgs !== undefined) {
-    const nestedAliasArgs = extractMentionArgs(platformMentionArgs, aliases);
-    return nestedAliasArgs === undefined ? platformMentionArgs : nestedAliasArgs;
+  const normalizedAlias = alias.trim().toLowerCase();
+  const bareAlias = normalizedAlias.startsWith("@") ? normalizedAlias.slice(1) : normalizedAlias;
+  if (!bareAlias) {
+    return undefined;
   }
 
-  for (const alias of aliases) {
-    const regex = new RegExp(
-      `(?:^|\\s)${escapeRegExp(alias)}(?:\\s*[:,\\-]?\\s*)(.*)$`,
-      "i",
-    );
-    const match = trimmed.match(regex);
-    if (!match) continue;
-    return (match[1] || "").trim();
+  const regex = new RegExp(`^${escapeRegExp(bareAlias)}(?=$|\\s|[:,\\-])(?:\\s*[:,\\-]?\\s*)(.*)$`, "i");
+  const match = trimmed.match(regex);
+  if (!match) {
+    return undefined;
+  }
+  return (match[1] || "").trim();
+}
+
+function extractLeadingAliasArgs(content: string, alias: string): string | undefined {
+  const trimmed = content.trim();
+  if (!trimmed) return undefined;
+
+  const regex = new RegExp(`^${escapeRegExp(alias)}(?=$|\\s|[:,\\-])(?:\\s*[:,\\-]?\\s*)(.*)$`, "i");
+  const match = trimmed.match(regex);
+  if (!match) {
+    return undefined;
+  }
+  return (match[1] || "").trim();
+}
+
+function extractLeadingStrippedAliasArgs(content: string, alias: string): string | undefined {
+  const trimmed = content.trim();
+  if (!trimmed) return undefined;
+
+  const normalizedAlias = alias.trim().toLowerCase();
+  const bareAlias = normalizedAlias.startsWith("@") ? normalizedAlias.slice(1) : normalizedAlias;
+  if (!bareAlias) {
+    return undefined;
+  }
+
+  const regex = new RegExp(`^${escapeRegExp(bareAlias)}(?=$|\\s|[:,\\-])(?:\\s*[:,\\-]?\\s*)(.*)$`, "i");
+  const match = trimmed.match(regex);
+  if (!match) {
+    return undefined;
+  }
+  return (match[1] || "").trim();
+}
+
+function matchLeadingMention(
+  content: string,
+  config: PluginConfig,
+  allowStrippedAliasFallback: boolean,
+): LeadingMentionMatch | undefined {
+  const trimmed = content.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const agentProfiles = resolveAgentProfiles(config);
+  const leadingPlatformMention = extractPlatformMention(trimmed);
+  if (leadingPlatformMention) {
+    return {
+      args: leadingPlatformMention.args,
+      matchedGeneric: true,
+      matchedAgent: agentProfiles.find((profile) =>
+        (profile.mentionIds || []).includes(leadingPlatformMention.mentionId),
+      ),
+    };
+  }
+
+  for (const profile of agentProfiles) {
+    const parenthesizedArgs = extractLeadingParenthesizedAgentArgs(trimmed, profile.id);
+    if (parenthesizedArgs !== undefined) {
+      return {
+        args: parenthesizedArgs,
+        matchedGeneric: true,
+        matchedAgent: profile,
+      };
+    }
+
+    for (const alias of profile.aliases || []) {
+      const args = extractLeadingAliasArgs(trimmed, alias);
+      if (args !== undefined) {
+        return {
+          args,
+          matchedGeneric: true,
+          matchedAgent: profile,
+        };
+      }
+    }
+  }
+
+  for (const alias of mentionAliases(config)) {
+    const args = extractLeadingAliasArgs(trimmed, alias);
+    if (args !== undefined) {
+      return {
+        args,
+        matchedGeneric: true,
+      };
+    }
+  }
+
+  if (!allowStrippedAliasFallback) {
+    return undefined;
+  }
+
+  for (const profile of agentProfiles) {
+    for (const alias of profile.aliases || []) {
+      const args = extractLeadingStrippedAliasArgs(trimmed, alias);
+      if (args !== undefined) {
+        return {
+          args,
+          matchedGeneric: true,
+          matchedAgent: profile,
+        };
+      }
+    }
+  }
+
+  for (const alias of mentionAliases(config)) {
+    const args = extractLeadingStrippedAliasArgs(trimmed, alias);
+    if (args !== undefined) {
+      return {
+        args,
+        matchedGeneric: true,
+      };
+    }
   }
 
   return undefined;
 }
 
-function extractStrippedAliasArgs(content: string, aliases: string[]): string | undefined {
+function dedupeAgentProfiles(agentProfiles: AgentProfile[]): AgentProfile[] {
+  const seen = new Set<string>();
+  const out: AgentProfile[] = [];
+  for (const profile of agentProfiles) {
+    if (seen.has(profile.id)) {
+      continue;
+    }
+    seen.add(profile.id);
+    out.push(profile);
+  }
+  return out;
+}
+
+function resolveLeadingMentionInvocation(
+  content: string,
+  config: PluginConfig,
+  allowStrippedAliasFallback: boolean,
+): MentionInvocation | undefined {
   const trimmed = content.trim();
-  if (!trimmed) return undefined;
+  if (!trimmed) {
+    return undefined;
+  }
 
-  const bareAliases = Array.from(
-    new Set(
-      aliases
-        .map((alias) => alias.trim().toLowerCase())
-        .filter((alias) => alias.length > 0)
-        .map((alias) => (alias.startsWith("@") ? alias.slice(1) : alias))
-        .filter((alias) => alias.length > 0),
-    ),
-  );
+  const matchedAgents: AgentProfile[] = [];
+  let current = trimmed;
+  let matchedAny = false;
 
-  for (const alias of bareAliases) {
-    const regex = new RegExp(`^${escapeRegExp(alias)}(?:\\s*[:,\\-]?\\s*)(.*)$`, "i");
-    const match = trimmed.match(regex);
-    if (!match) continue;
-    return (match[1] || "").trim();
+  while (true) {
+    const match = matchLeadingMention(current, config, allowStrippedAliasFallback);
+    if (!match) {
+      break;
+    }
+
+    matchedAny = matchedAny || match.matchedGeneric;
+    if (match.matchedAgent) {
+      matchedAgents.push(match.matchedAgent);
+    }
+    current = match.args;
+  }
+
+  if (!matchedAny) {
+    return undefined;
+  }
+
+  return {
+    args: current.trim(),
+    agentProfiles: dedupeAgentProfiles(matchedAgents),
+  };
+}
+
+function resolveSingleMentionInvocation(
+  content: string,
+  config: PluginConfig,
+  allowStrippedAliasFallback: boolean,
+): MentionInvocation | undefined {
+  const trimmed = content.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const agentProfiles = resolveAgentProfiles(config);
+  const leadingPlatformMention = extractPlatformMention(trimmed);
+  if (leadingPlatformMention) {
+    const matchedAgent =
+      agentProfiles.find((profile) => (profile.mentionIds || []).includes(leadingPlatformMention.mentionId));
+    if (matchedAgent) {
+      return {
+        args: leadingPlatformMention.args,
+        agentProfiles: [matchedAgent],
+      };
+    }
+
+    const nested = resolveSingleMentionInvocation(leadingPlatformMention.args, config, allowStrippedAliasFallback);
+    if (nested) {
+      return nested;
+    }
+
+    return {
+      args: leadingPlatformMention.args,
+    };
+  }
+
+  for (const profile of agentProfiles) {
+    for (const alias of profile.aliases || []) {
+      if (isLeadingOnlyAlias(alias)) {
+        continue;
+      }
+      const args = extractAliasArgs(trimmed, alias);
+      if (args !== undefined) {
+        return {
+          args,
+          agentProfiles: [profile],
+        };
+      }
+    }
+  }
+
+  for (const alias of mentionAliases(config)) {
+    if (isLeadingOnlyAlias(alias)) {
+      continue;
+    }
+    const args = extractAliasArgs(trimmed, alias);
+    if (args !== undefined) {
+      return {
+        args,
+      };
+    }
+  }
+
+  if (!allowStrippedAliasFallback) {
+    return undefined;
+  }
+
+  for (const profile of agentProfiles) {
+    for (const alias of profile.aliases || []) {
+      if (isLeadingOnlyAlias(alias)) {
+        continue;
+      }
+      const args = extractStrippedAliasArgs(trimmed, alias);
+      if (args !== undefined) {
+        return {
+          args,
+          agentProfiles: [profile],
+        };
+      }
+    }
+  }
+
+  for (const alias of mentionAliases(config)) {
+    if (isLeadingOnlyAlias(alias)) {
+      continue;
+    }
+    const args = extractStrippedAliasArgs(trimmed, alias);
+    if (args !== undefined) {
+      return {
+        args,
+      };
+    }
   }
 
   return undefined;
+}
+
+function resolveMentionInvocation(
+  content: string,
+  config: PluginConfig,
+  allowStrippedAliasFallback: boolean,
+): MentionInvocation | undefined {
+  return (
+    resolveLeadingMentionInvocation(content, config, allowStrippedAliasFallback) ||
+    resolveSingleMentionInvocation(content, config, allowStrippedAliasFallback)
+  );
 }
 
 function hasExplicitMentionSignal(metadata: Record<string, unknown>): boolean {
@@ -262,6 +572,94 @@ function contextFromMessageEvent(event: MessageEvent, ctx: MessageContext): Conv
     userDisplayName: userDisplayNameFromMetadata(metadata),
     userUsername: userUsernameFromMetadata(metadata),
     userEmail: userEmailFromMetadata(metadata),
+  };
+}
+
+function normalizeChannelMatcher(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function channelMatchersFromEvent(
+  event: MessageEvent,
+  ctx: MessageContext,
+  conversationContext: ConversationKeyContext,
+): Set<string> {
+  const metadata = asRecord(event.metadata);
+  const values = new Set<string>();
+  const add = (value: unknown) => {
+    const normalized = asString(value);
+    if (!normalized) {
+      return;
+    }
+    values.add(normalizeChannelMatcher(normalized));
+  };
+
+  const { key: conversationKey } = resolveConversationKey(conversationContext);
+  add(conversationKey);
+
+  add(ctx.conversationId);
+  add(metadata.conversationId);
+  add(metadata.channelId);
+  add(metadata.channel);
+  add(metadata.channelName);
+  add(metadata.channel_name);
+  add(metadata.conversationName);
+  add(metadata.conversation_name);
+  add(metadata.roomName);
+  add(metadata.room);
+  add(metadata.teamChannelName);
+  add(metadata.teamChannel);
+  add(metadata.to);
+  add(metadata.originatingTo);
+
+  return values;
+}
+
+function formatAllowedChannels(agentProfile: AgentProfile): string {
+  const allowedChannels = (agentProfile.allowedChannels || []).filter((value) => value.trim().length > 0);
+  return allowedChannels.length > 0 ? allowedChannels.join(", ") : "(none configured)";
+}
+
+function applyAgentChannelRestrictions(
+  invocation: MentionInvocation | undefined,
+  event: MessageEvent,
+  ctx: MessageContext,
+  conversationContext: ConversationKeyContext,
+): MentionInvocation | undefined {
+  if (!invocation?.agentProfiles || invocation.agentProfiles.length === 0) {
+    return invocation;
+  }
+
+  const channelMatchers = channelMatchersFromEvent(event, ctx, conversationContext);
+  const allowed: AgentProfile[] = [];
+  const restricted: Array<{ agentProfile: AgentProfile; reason: string }> = [];
+
+  for (const agentProfile of invocation.agentProfiles) {
+    const configuredChannels = (agentProfile.allowedChannels || [])
+      .map((value) => normalizeChannelMatcher(value))
+      .filter((value) => value.length > 0);
+
+    if (configuredChannels.length === 0) {
+      allowed.push(agentProfile);
+      continue;
+    }
+
+    const isAllowed = configuredChannels.some((value) => channelMatchers.has(value));
+    if (isAllowed) {
+      allowed.push(agentProfile);
+      continue;
+    }
+
+    restricted.push({
+      agentProfile,
+      reason: `Agent ${agentProfile.id} is not allowed in this channel. Allowed channels: ${formatAllowedChannels(agentProfile)}`,
+    });
+  }
+
+  return {
+    ...invocation,
+    agentProfiles: allowed,
+    ...(restricted.length > 0 ? { restrictedAgents: restricted } : {}),
   };
 }
 
@@ -758,6 +1156,187 @@ function resolveReplyDelivery(event: MessageEvent, ctx: MessageContext): Mention
   };
 }
 
+function formatConsolidatedAgentReply(args: string, results: AgentExecutionResult[]): string {
+  const promptLabel = args.trim() || "(no prompt)";
+  const lines = [
+    `Consolidated multi-agent response`,
+    `Prompt: ${promptLabel}`,
+  ];
+
+  for (const result of results) {
+    lines.push("");
+    lines.push(`== ${result.agentProfile.id} ==`);
+    lines.push(result.error ? `Error: ${result.error}` : result.text.trim() || "(no reply)");
+  }
+
+  return lines.join("\n");
+}
+
+function commonDirectory(paths: string[]): string {
+  if (paths.length === 0) {
+    return process.cwd();
+  }
+
+  let shared = path.resolve(paths[0] || process.cwd());
+  for (const rawPath of paths.slice(1)) {
+    const candidate = path.resolve(rawPath);
+    while (!candidate.startsWith(shared + path.sep) && candidate !== shared && shared !== path.dirname(shared)) {
+      shared = path.dirname(shared);
+    }
+    if (candidate === shared || candidate.startsWith(shared + path.sep)) {
+      continue;
+    }
+    shared = path.dirname(shared);
+  }
+
+  return shared;
+}
+
+function buildConsolidationPrompt(prompt: string, results: AgentExecutionResult[]): string {
+  const sections = results.map((result) => {
+    const label = result.agentProfile.id;
+    const body = result.error
+      ? `Status: error\nDetails: ${result.error}`
+      : `Status: ok\nDetails:\n${result.text.trim() || "(no reply)"}`;
+    return `Agent: ${label}\n${body}`;
+  });
+
+  return [
+    "You are consolidating completed HivePing multi-agent results.",
+    "Do not inspect repositories or run new work. Use only the findings below.",
+    "Write one final answer for the user, not a transcript.",
+    "Start with the direct conclusion, then summarize key evidence from each agent, and call out any conflicts or next checks if needed.",
+    "",
+    `Original user request: ${prompt.trim() || "(no prompt)"}`,
+    "",
+    "Agent findings:",
+    ...sections.flatMap((section) => [section, ""]),
+  ].join("\n");
+}
+
+async function synthesizeConsolidatedAgentReply(
+  prompt: string,
+  results: AgentExecutionResult[],
+  deps: GovernDeps,
+  options: MentionHookOptions,
+): Promise<string> {
+  if (typeof options.consolidateReply === "function") {
+    return (await options.consolidateReply({ prompt, results })).trim();
+  }
+
+  const repoPaths = results.map((result) => result.agentProfile.repoPath).filter((value) => value.trim().length > 0);
+  const cwd = commonDirectory(repoPaths);
+  const synthesisConfig: PluginConfig = {
+    ...deps.config,
+    defaultSandbox: "read-only",
+    defaultApprovalPolicy: "never",
+  };
+  const response = await callReasoningOnce(
+    synthesisConfig,
+    cwd,
+    buildConsolidationPrompt(prompt, results),
+  );
+  return response.text.trim();
+}
+
+async function runMentionInvocation(
+  invocation: MentionInvocation | undefined,
+  args: string,
+  conversationContext: ConversationKeyContext,
+  deps: GovernDeps,
+  options: MentionHookOptions,
+): Promise<string> {
+  const agentProfiles = invocation?.agentProfiles || [];
+  const restrictedAgents = invocation?.restrictedAgents || [];
+  const restrictedResults: AgentExecutionResult[] = restrictedAgents.map(({ agentProfile, reason }) => ({
+    agentProfile,
+    text: "",
+    error: reason,
+  }));
+
+  if (agentProfiles.length === 0 && restrictedResults.length > 0) {
+    if (restrictedResults.length === 1) {
+      return `Error: ${restrictedResults[0]?.error || "Agent is not allowed in this channel."}`;
+    }
+    try {
+      return await synthesizeConsolidatedAgentReply(args, restrictedResults, deps, options);
+    } catch {
+      return formatConsolidatedAgentReply(args, restrictedResults).trim();
+    }
+  }
+
+  if (agentProfiles.length <= 1) {
+    const agentProfile = agentProfiles[0];
+    const text = (
+      await runGovern(args, conversationContext, deps, {
+        ...(agentProfile
+          ? {
+              agentProfile,
+              fixedBinding: {
+                repoPath: agentProfile.repoPath,
+                provider: asString(conversationContext.channel)?.toLowerCase() || "unknown",
+                metadata: {
+                  agentId: agentProfile.id,
+                },
+                updatedAt: new Date().toISOString(),
+              },
+              historyConversationKey: agentProfile.homeConversationKey,
+            }
+          : {}),
+      })
+    ).text.trim();
+    if (restrictedResults.length === 0) {
+      return text;
+    }
+    const combinedResults = [
+      ...(agentProfile ? [{ agentProfile, text }] : []),
+      ...restrictedResults,
+    ];
+    try {
+      return await synthesizeConsolidatedAgentReply(args, combinedResults, deps, options);
+    } catch {
+      return formatConsolidatedAgentReply(args, combinedResults).trim();
+    }
+  }
+
+  const results: AgentExecutionResult[] = [];
+  for (const agentProfile of agentProfiles) {
+    try {
+      const text = (
+        await runGovern(args, conversationContext, deps, {
+          agentProfile,
+          fixedBinding: {
+            repoPath: agentProfile.repoPath,
+            provider: asString(conversationContext.channel)?.toLowerCase() || "unknown",
+            metadata: {
+              agentId: agentProfile.id,
+            },
+            updatedAt: new Date().toISOString(),
+          },
+          historyConversationKey: agentProfile.homeConversationKey,
+        })
+      ).text.trim();
+      results.push({
+        agentProfile,
+        text,
+      });
+    } catch (error) {
+      results.push({
+        agentProfile,
+        text: "",
+        error: formatError(error),
+      });
+    }
+  }
+
+  const combinedResults = [...results, ...restrictedResults];
+  try {
+    return await synthesizeConsolidatedAgentReply(args, combinedResults, deps, options);
+  } catch {
+    return formatConsolidatedAgentReply(args, combinedResults).trim();
+  }
+}
+
 function shouldSuppressDefaultTurn(event: unknown, ctx: unknown, aliases: string[]): boolean {
   const conversationKeys = conversationKeyCandidatesFromPromptHook(event, ctx);
   const suppressByConversation = conversationKeys.some((key) =>
@@ -873,34 +1452,32 @@ export function registerMentionHook(
     }
 
     const contentCandidates = textCandidatesFromEvent(event);
-    const content = contentCandidates[0] || "";
     const metadata = asRecord(event.metadata);
     const provider = asString(ctx.channelId)?.toLowerCase();
-    const explicitArgs =
+    const invocation =
       contentCandidates
-        .map((candidate) => extractMentionArgs(candidate, aliases))
+        .map((candidate) =>
+          resolveMentionInvocation(
+            candidate,
+            deps.config,
+            provider === "slack" || provider === "msteams" || provider === "teams",
+          ),
+        )
         .find((candidate) => candidate !== undefined) ?? undefined;
-    const strippedAliasArgs =
-      explicitArgs === undefined &&
-      (provider === "slack" || provider === "msteams" || provider === "teams")
-        ? contentCandidates
-            .map((candidate) => extractStrippedAliasArgs(candidate, aliases))
-            .find((candidate) => candidate !== undefined)
-        : undefined;
     const fallbackContentCandidate = contentCandidates.find((candidate) => candidate.trim().length > 0);
     const metadataMentionArgs =
-      explicitArgs === undefined &&
-      strippedAliasArgs === undefined &&
+      invocation === undefined &&
       hasExplicitMentionSignal(metadata) &&
       fallbackContentCandidate !== undefined
         ? fallbackContentCandidate.trim()
         : undefined;
-    const args = explicitArgs ?? strippedAliasArgs ?? metadataMentionArgs;
+    const conversationContext = contextFromMessageEvent(event, ctx);
+    const effectiveInvocation = applyAgentChannelRestrictions(invocation, event, ctx, conversationContext);
+    const args = effectiveInvocation?.args ?? metadataMentionArgs;
     if (args === undefined) {
       return;
     }
 
-    const conversationContext = contextFromMessageEvent(event, ctx);
     const { key: conversationKey } = resolveConversationKey(conversationContext);
     markPendingPromptSuppression(conversationKey);
     markPendingPromptSuppressionFallback();
@@ -922,7 +1499,7 @@ export function registerMentionHook(
     markPendingSuppressionFallback();
 
     try {
-      const replyText = (await runGovern(args, conversationContext, deps)).text.trim();
+      const replyText = await runMentionInvocation(effectiveInvocation, args, conversationContext, deps, options);
       if (replyText.length === 0) {
         return { cancel: true };
       }
