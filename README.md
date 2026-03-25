@@ -3,6 +3,8 @@
 
 # HivePing
 
+Demo: https://www.youtube.com/watch?v=EE8AI7FWZC0
+
 Conversation-scoped mention bridge for OpenClaw channels (Discord, Slack, Microsoft Teams) with Codex as the default reasoning backend.
 
 HivePing runs in mention-only mode.
